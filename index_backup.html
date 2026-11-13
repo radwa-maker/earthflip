@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>EARTHFLIP — NASA Space Apps 2026</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    body { font-family: sans-serif; background: #0b1120; color: #e2e8f0; margin: 0; }
+    header { background: #0f172a; padding: 15px 20px; border-bottom: 1px solid #24324d; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
+    h1 { margin: 0; font-size: 1.3rem; } h1 span { color: #38bdf8; }
+    select, button { background: #131c31; color: #fff; border: 1px solid #24324d; padding: 6px 10px; border-radius: 5px; }
+    button { background: #38bdf8; color: #0b1120; font-weight: bold; cursor: pointer; border: none; }
+    .grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 15px; padding: 15px; max-width: 1400px; margin: auto; }
+    .card { background: #131c31; border: 1px solid #24324d; border-radius: 8px; padding: 15px; }
+    .full { grid-column: 1 / -1; }
+    .kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+    .kpi { background: #131c31; border: 1px solid #24324d; padding: 10px; border-radius: 6px; text-align: center; }
+    .kpi b { font-size: 1.4rem; display: block; }
+    #map { height: 400px; border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 8px; }
+    td { padding: 6px 4px; border-bottom: 1px solid #24324d; }
+    .pair { background: #0f172a; border: 1px solid #24324d; padding: 10px; border-radius: 6px; margin-bottom: 8px; cursor: pointer; }
+    .pair:hover { border-color: #38bdf8; }
+    #loading { position: fixed; inset: 0; background: rgba(11,17,32,0.9); display: flex; align-items: center; justify-content: center; z-index: 9999; font-size: 1.2rem; }
+  </style>
+</head>
+<body>
+<div id="loading">Fetching NASA MERRA-2 Data...</div>
+<header>
+  <div><h1>EARTH<span>FLIP</span> — Earth System Trend Detective</h1><small>NASA Space Apps Challenge 2026 | Variable: 2m Air Temp (T2M, °C)</small></div>
+  <div>
+    Start: <select id="startYear"></select>
+    End: <select id="endYear"></select>
+    FDR: <select id="fdrAlpha"><option value="0.05">q &lt; 0.05</option><option value="0.10">q &lt; 0.10</option></select>
+    <button onclick="runAnalysis()">Run Engine</button>
+  </div>
+</header>
+<div class="grid">
+  <div class="full kpis">
+    <div class="kpi">Regions<b id="kpiTotal">-</b></div>
+    <div class="kpi" style="color:#f97316">Increasing<b id="kpiInc">-</b></div>
+    <div class="kpi" style="color:#06b6d4">Decreasing<b id="kpiDec">-</b></div>
+    <div class="kpi" style="color:#94a3b8">No Sig. Trend<b id="kpiNoSig">-</b></div>
+    <div class="kpi" style="color:#38bdf8">Opposite Pairs<b id="kpiPairs">-</b></div>
+  </div>
+  <div class="card"><h3>Global Trend Map (Click a Marker)</h3><div id="map"></div></div>
+  <div class="card"><h3 id="regTitle">Region Inspector</h3><div id="tsChart" style="height:210px"></div><table id="statTable"></table></div>
+  <div class="card full"><h3>Opposite Trend Detection Engine (Click Pair to Compare)</h3><div id="pairsList"></div><div id="compChart" style="height:240px;display:none"></div></div>
+</div>
+<script>
+  let map, layer, appData = null;
+  for (let y = 1981; y <= 2015; y++) document.getElementById("startYear").add(new Option(y, y, y === 1981, y === 1981));
+  for (let y = 1990; y <= 2025; y++) document.getElementById("endYear").add(new Option(y, y, y === 2025, y === 2025));
+  map = L.map("map").setView([20, 10], 2);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+  layer = L.layerGroup().addTo(map);
+
+  const clr = c => c === "Increasing" ? "#f97316" : c === "Decreasing" ? "#06b6d4" : c === "Insufficient Data" ? "#a855f7" : "#94a3b8";
+
+  async function runAnalysis() {
+    document.getElementById("loading").style.display = "flex";
+    const s = document.getElementById("startYear").value, e = document.getElementById("endYear").value, q = document.getElementById("fdrAlpha").value;
+    try {
+      const res = await fetch(`/api/analyze?start_year=${s}&end_year=${e}&fdr_alpha=${q}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      appData = data;
+    } catch (err) {
+      alert(`Analysis failed: ${err.message}`);
+      document.getElementById("loading").style.display = "none";
+      return;
+    }
+    document.getElementById("loading").style.display = "none";
+
+    const c = appData.summary_counts;
+    document.getElementById("kpiTotal").textContent = c.total_regions;
+    document.getElementById("kpiInc").textContent = c.increasing;
+    document.getElementById("kpiDec").textContent = c.decreasing;
+    document.getElementById("kpiNoSig").textContent = c.no_significant_trend;
+    document.getElementById("kpiPairs").textContent = c.verified_opposite_pairs;
+
+    layer.clearLayers();
+    appData.regions.forEach((r, i) => {
+      const m = L.circleMarker([r.region.lat, r.region.lon], { radius: 9, fillColor: clr(r.classification), color: "#fff", weight: 1.5, fillOpacity: 0.9 });
+      m.bindTooltip(`${r.region.name}: ${r.classification}`);
+      m.on("click", () => showRegion(r));
+      m.addTo(layer);
+      if (i === 0) showRegion(r);
+    });
+
+    const pBox = document.getElementById("pairsList");
+    document.getElementById("compChart").style.display = "none";
+    if (!appData.opposite_pairs.length) {
+      pBox.innerHTML = "<p>No statistically significant opposite pairs in this period. Try 1981–2010 or 1995–2015.</p>";
+    } else {
+      pBox.innerHTML = appData.opposite_pairs.map((p, idx) => `<div class="pair" onclick="showPair(${idx})"><b>▲ ${p.increasing_region}</b> (${p.increasing_slope} °C/dec, q=${p.increasing_q}) vs. <b>▼ ${p.decreasing_region}</b> (${p.decreasing_slope} °C/dec, q=${p.decreasing_q}) — Divergence: <b>${p.divergence_magnitude_decade} °C/dec</b></div>`).join("");
+    }
+  }
+
+  function showRegion(r) {
+    document.getElementById("regTitle").textContent = `${r.region.name} — ${r.classification}`;
+    const st = r.stats;
+    document.getElementById("statTable").innerHTML = `
+      <tr><td>Period & Valid Months</td><td>${r.analysis_period} (${st.n_valid}/${st.n_expected} months, ${st.completeness_pct}%)</td></tr>
+      <tr><td>Seasonal Sen's Slope</td><td><b>${st.slope_decade ?? "N/A"} °C / decade</b></td></tr>
+      <tr><td>95% Confidence Interval</td><td>[${st.ci_low_decade ?? "N/A"}, ${st.ci_high_decade ?? "N/A"}] °C / decade</td></tr>
+      <tr><td>P-Value / FDR Q-Value</td><td>p = ${st.p_value ?? "N/A"} | q = ${st.q_value_fdr ?? "N/A"}</td></tr>
+      <tr><td>Source</td><td>NASA MERRA-2 M2TMNXSLV via NASA POWER</td></tr>`;
+    Plotly.newPlot("tsChart", [{ x: r.annual_series.map(d => d.year), y: r.annual_series.map(d => d.anomaly), type: "scatter", line: { color: clr(r.classification) } }], { margin: { t: 10, b: 30, l: 40, r: 10 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { color: "#e2e8f0" } }, { displayModeBar: false });
+  }
+
+  function showPair(idx) {
+    const p = appData.opposite_pairs[idx];
+    const r1 = appData.regions.find(r => r.region.id === p.increasing_id), r2 = appData.regions.find(r => r.region.id === p.decreasing_id);
+    const div = document.getElementById("compChart"); div.style.display = "block";
+    Plotly.newPlot("compChart", [
+      { x: r1.annual_series.map(d => d.year), y: r1.annual_series.map(d => d.anomaly), name: r1.region.name, line: { color: "#f97316" } },
+      { x: r2.annual_series.map(d => d.year), y: r2.annual_series.map(d => d.anomaly), name: r2.region.name, line: { color: "#06b6d4" } }
+    ], { margin: { t: 20, b: 30, l: 40, r: 10 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { color: "#e2e8f0" } }, { displayModeBar: false });
+  }
+  runAnalysis();
+</script>
+</body>
+</html>
